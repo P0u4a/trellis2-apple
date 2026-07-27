@@ -218,11 +218,13 @@ def to_glb(
     aabb: Union[list, tuple, np.ndarray, torch.Tensor],
     voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor] = None,
     grid_size: Union[int, list, tuple, np.ndarray, torch.Tensor] = None,
-    decimation_target: int = 1000000,
+    decimation_target: Optional[int] = 1000000,
     texture_size: int = 2048,
     remesh: bool = False,
     remesh_band: float = 1,
     remesh_project: float = 0.9,
+    remesh_project_max_dist: float = 1.5,
+    remesh_project_min_agreement: float = 0.5,
     verbose: bool = False,
     use_tqdm: bool = False,
     **kwargs,
@@ -282,16 +284,21 @@ def to_glb(
         print(f"After hole filling: {len(tm.vertices)} vertices, {len(tm.faces)} faces")
 
     # --- Step 2: Simplification ---
-    if decimation_target < len(tm.faces):
+    effective_decimation_target = (
+        len(tm.faces) if decimation_target is None else int(decimation_target)
+    )
+    if effective_decimation_target <= 0:
+        effective_decimation_target = len(tm.faces)
+    if effective_decimation_target < len(tm.faces):
         if HAS_FAST_SIMPLIFICATION:
-            ratio = min(1.0, decimation_target / max(len(tm.faces), 1))
+            ratio = min(1.0, effective_decimation_target / max(len(tm.faces), 1))
             new_verts, new_faces = fast_simplification.simplify(
                 tm.vertices.astype(np.float64), tm.faces,
                 target_reduction=(1.0 - ratio),
             )
             tm = trimesh.Trimesh(vertices=new_verts, faces=new_faces, process=False)
         elif hasattr(tm, 'simplify_quadric_decimation'):
-            tm = tm.simplify_quadric_decimation(decimation_target)
+            tm = tm.simplify_quadric_decimation(effective_decimation_target)
         if verbose:
             print(f"After simplification: {len(tm.vertices)} vertices, {len(tm.faces)} faces")
 

@@ -43,10 +43,32 @@ That is the checkpoint's upstream default and establishes a lower-resolution
 shape before high-resolution refinement. Direct `1024` is faster but can be
 less structurally stable.
 
-GLB export does not remesh by default because the Metal remeshing/material
-projection path is still experimental. Pass `--remesh` to match the upstream
-CUDA export recipe; compare the result carefully for holes or damaged
-materials.
+GLB export does not remesh by default. The guarded Metal remesher ports the
+distance, normal-agreement, and face-flip protections from Microsoft
+TRELLIS.2 PR #175, but its best settings depend on source topology. The
+default band (`--remesh-band 1`) works for clean closed objects. Thin,
+layered characters can require `--remesh-band 5`; narrower bands may create
+lattice or pitted surfaces, while the wider band smooths facial and hand
+detail. For image-to-character quality, compare against `--no-remesh` rather
+than assuming remeshing is better.
+
+Save the decoded mesh when tuning post-processing so inference only runs once:
+
+```sh
+.venv/bin/python generate_mlx.py input.png \
+  --pipeline-type 1024_cascade \
+  --save-raw outputs/model.raw.pt \
+  --no-remesh \
+  --output outputs/model.glb
+
+.venv/bin/python generate_mlx.py input.png \
+  --load-raw outputs/model.raw.pt \
+  --remesh --remesh-band 5 \
+  --output outputs/model-remeshed.glb
+
+.venv/bin/python -m trellis2.mesh_integrity \
+  outputs/model-remeshed.glb --json
+```
 
 Use a transparent PNG when possible; this avoids loading the background
 removal network. The generator defaults to a 1024 texture and a 200K-face mesh

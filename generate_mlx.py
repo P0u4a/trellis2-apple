@@ -53,6 +53,30 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--remesh-band",
+        type=float,
+        default=1.0,
+        help="Narrow-band width for dual-contouring remesh.",
+    )
+    parser.add_argument(
+        "--remesh-project",
+        type=float,
+        default=0.7,
+        help="Guarded projection strength after dual-contouring remesh.",
+    )
+    parser.add_argument(
+        "--remesh-project-max-dist",
+        type=float,
+        default=1.5,
+        help="Maximum projection distance measured in remesh voxels.",
+    )
+    parser.add_argument(
+        "--remesh-project-min-agreement",
+        type=float,
+        default=0.5,
+        help="Minimum absolute normal agreement for projected vertices.",
+    )
+    parser.add_argument(
         "--preprocessed",
         action="store_true",
         help="Skip crop/background removal; use only for an already prepared square image.",
@@ -66,11 +90,21 @@ def main() -> int:
         action="store_true",
         help="Run generation and report memory without texture baking (for probes).",
     )
+    parser.add_argument(
+        "--save-raw",
+        help="Save the decoded MeshWithVoxel before GLB post-processing.",
+    )
+    parser.add_argument(
+        "--load-raw",
+        help="Load a previously saved MeshWithVoxel and run only GLB export.",
+    )
     args = parser.parse_args()
 
-    if not os.path.isfile(args.image):
+    if not args.load_raw and not os.path.isfile(args.image):
         parser.error(f"input image does not exist: {args.image}")
-    if not os.path.isfile(os.path.join(args.weights, "pipeline.json")):
+    if args.load_raw and not os.path.isfile(args.load_raw):
+        parser.error(f"raw mesh does not exist: {args.load_raw}")
+    if not args.load_raw and not os.path.isfile(os.path.join(args.weights, "pipeline.json")):
         parser.error(
             f"weights are incomplete at {args.weights}; run scripts/download_weights.py"
         )
@@ -83,38 +117,54 @@ def main() -> int:
     mx.set_cache_limit(2 * 1024 ** 3)
 
     started = time.perf_counter()
-    pipeline = create_mlx_pipeline(
-        args.weights,
-        pipeline_type=args.pipeline_type,
-        flow_precision=args.flow_precision,
-    )
-    loaded = time.perf_counter()
-    print(
-        f"[MLX] Models loaded in {loaded - started:.1f}s; "
-        f"active={_memory_gib(mx.get_active_memory()):.2f} GiB"
-    )
+    if args.load_raw:
+        import torch
 
-    image = Image.open(args.image)
-    preprocess_image = not args.preprocessed
-    if args.save_preprocessed:
-        if preprocess_image:
-            image = pipeline.preprocess_image(image)
-            preprocess_image = False
-        preprocessed_output = os.path.abspath(args.save_preprocessed)
-        os.makedirs(os.path.dirname(preprocessed_output), exist_ok=True)
-        image.save(preprocessed_output)
-        print(f"Preprocessed input: {preprocessed_output}")
-    sampler = {"steps": args.steps}
-    meshes = pipeline.run(
-        image,
-        seed=args.seed,
-        pipeline_type=args.pipeline_type,
-        preprocess_image=preprocess_image,
-        sparse_structure_sampler_params=sampler,
-        shape_slat_sampler_params=sampler,
-        tex_slat_sampler_params=sampler,
-    )
-    generated = time.perf_counter()
+        meshes = [torch.load(args.load_raw, map_location="cpu", weights_only=False)]
+        loaded = started
+        generated = time.perf_counter()
+        print(f"Loaded raw mesh: {os.path.abspath(args.load_raw)}")
+    else:
+        pipeline = create_mlx_pipeline(
+            args.weights,
+            pipeline_type=args.pipeline_type,
+            flow_precision=args.flow_precision,
+        )
+        loaded = time.perf_counter()
+        print(
+            f"[MLX] Models loaded in {loaded - started:.1f}s; "
+            f"active={_memory_gib(mx.get_active_memory()):.2f} GiB"
+        )
+
+        image = Image.open(args.image)
+        preprocess_image = not args.preprocessed
+        if args.save_preprocessed:
+            if preprocess_image:
+                image = pipeline.preprocess_image(image)
+                preprocess_image = False
+            preprocessed_output = os.path.abspath(args.save_preprocessed)
+            os.makedirs(os.path.dirname(preprocessed_output), exist_ok=True)
+            image.save(preprocessed_output)
+            print(f"Preprocessed input: {preprocessed_output}")
+        sampler = {"steps": args.steps}
+        meshes = pipeline.run(
+            image,
+            seed=args.seed,
+            pipeline_type=args.pipeline_type,
+            preprocess_image=preprocess_image,
+            sparse_structure_sampler_params=sampler,
+            shape_slat_sampler_params=sampler,
+            tex_slat_sampler_params=sampler,
+        )
+        generated = time.perf_counter()
+
+    if args.save_raw:
+        import torch
+
+        raw_output = os.path.abspath(args.save_raw)
+        os.makedirs(os.path.dirname(raw_output), exist_ok=True)
+        torch.save(meshes[0].cpu(), raw_output)
+        print(f"Raw mesh checkpoint: {raw_output}")
 
     output = os.path.abspath(args.output)
     os.makedirs(os.path.dirname(output), exist_ok=True)
@@ -125,6 +175,10 @@ def main() -> int:
             decimation_target=args.decimation_target,
             texture_size=args.texture_size,
             remesh=args.remesh,
+            remesh_band=args.remesh_band,
+            remesh_project=args.remesh_project,
+            remesh_project_max_dist=args.remesh_project_max_dist,
+            remesh_project_min_agreement=args.remesh_project_min_agreement,
         )
     finished = time.perf_counter()
 

@@ -45,6 +45,7 @@ git submodule update --init --recursive
 BUILD_TARGET=cpu uv pip install \
   --python "$venv_dir/bin/python" \
   --no-build-isolation \
+  --editable \
   ./o-voxel
 
 print "Validating Hugging Face authentication..."

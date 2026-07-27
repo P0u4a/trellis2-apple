@@ -365,6 +365,10 @@ def to_glb(mesh, output_path: str,
            decimation_target: int = 200000,
            texture_size: int = 1024,
            remesh: bool = False,
+           remesh_band: float = 1.0,
+           remesh_project: float = 0.7,
+           remesh_project_max_dist: float = 1.5,
+           remesh_project_min_agreement: float = 0.5,
            verbose: bool = True) -> str:
     """Export MeshWithVoxel to GLB with a Metal-safe face count."""
     import o_voxel
@@ -374,9 +378,11 @@ def to_glb(mesh, output_path: str,
     faces = mesh.faces.cpu()
     target_faces = min(decimation_target, faces.shape[0])
 
-    # mtlbvh can fail on the decoder's raw ~800K-face mesh. Simplifying before
-    # BVH construction also substantially reduces peak memory during baking.
-    if faces.shape[0] > target_faces:
+    # Preserve the decoder's full geometry for dual-contouring remesh. The
+    # guarded remesh rebuilds topology first and decimates afterward; early
+    # simplification permanently discards the detail it is intended to recover.
+    # The legacy non-remesh path retains its Metal-safe pre-simplification.
+    if not remesh and faces.shape[0] > target_faces:
         import fast_simplification
         verts_np, faces_np = fast_simplification.simplify(
             vertices.numpy(),
@@ -387,6 +393,11 @@ def to_glb(mesh, output_path: str,
         vertices = torch.from_numpy(verts_np).float()
         faces = torch.from_numpy(faces_np.astype('int32'))
         print(f"Simplified mesh to {faces.shape[0]:,} faces before texture baking.")
+    elif remesh:
+        print(
+            f"Preserving {faces.shape[0]:,} raw faces for guarded remeshing; "
+            f"final target is {target_faces:,}."
+        )
 
     print(f"Exporting to {output_path}...")
     glb = o_voxel.postprocess.to_glb(
@@ -400,6 +411,10 @@ def to_glb(mesh, output_path: str,
         decimation_target=target_faces,
         texture_size=texture_size,
         remesh=remesh,
+        remesh_band=remesh_band,
+        remesh_project=remesh_project,
+        remesh_project_max_dist=remesh_project_max_dist,
+        remesh_project_min_agreement=remesh_project_min_agreement,
         verbose=verbose,
     )
     glb.export(output_path)
