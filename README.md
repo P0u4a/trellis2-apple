@@ -37,6 +37,13 @@ Use a transparent PNG when possible; this avoids loading the background
 removal network. The generator defaults to a 1024 texture and a 200K-face mesh
 to keep texture baking within the Metal memory and BVH limits.
 
+The Gradio UI is optional and is not installed by `setup_macos.sh`. To use it:
+
+```sh
+uv pip install --python .venv/bin/python "gradio>=5,<6"
+.venv/bin/python app_mlx.py
+```
+
 ## ✨ Features
 
 ### 1. High Quality, Resolution & Efficiency

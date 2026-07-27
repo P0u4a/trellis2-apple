@@ -33,7 +33,6 @@ timm
 fastapi
 uvicorn[standard]
 pydantic>=2.0
-gradio>=5,<6
 
 # MLX (Apple Silicon native)
 mlx>=0.31.0
