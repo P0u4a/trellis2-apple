@@ -32,12 +32,34 @@ def main() -> int:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--steps", type=int, default=12)
+    parser.add_argument(
+        "--flow-precision",
+        choices=("float32", "bfloat16"),
+        default="bfloat16",
+        help=(
+            "Flow-transformer compute precision. bfloat16 matches the released "
+            "checkpoint; float32 is available for numerical diagnostics."
+        ),
+    )
     parser.add_argument("--decimation-target", type=int, default=200_000)
     parser.add_argument("--texture-size", type=int, choices=(512, 1024, 2048), default=1024)
+    parser.add_argument(
+        "--remesh",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Remesh during GLB export. The upstream CUDA path enables this, but "
+            "the Metal path is experimental and can damage projected materials."
+        ),
+    )
     parser.add_argument(
         "--preprocessed",
         action="store_true",
         help="Skip crop/background removal; use only for an already prepared square image.",
+    )
+    parser.add_argument(
+        "--save-preprocessed",
+        help="Save the exact square, background-removed conditioning image for inspection.",
     )
     parser.add_argument(
         "--skip-export",
@@ -61,7 +83,11 @@ def main() -> int:
     mx.set_cache_limit(2 * 1024 ** 3)
 
     started = time.perf_counter()
-    pipeline = create_mlx_pipeline(args.weights, pipeline_type=args.pipeline_type)
+    pipeline = create_mlx_pipeline(
+        args.weights,
+        pipeline_type=args.pipeline_type,
+        flow_precision=args.flow_precision,
+    )
     loaded = time.perf_counter()
     print(
         f"[MLX] Models loaded in {loaded - started:.1f}s; "
@@ -69,12 +95,21 @@ def main() -> int:
     )
 
     image = Image.open(args.image)
+    preprocess_image = not args.preprocessed
+    if args.save_preprocessed:
+        if preprocess_image:
+            image = pipeline.preprocess_image(image)
+            preprocess_image = False
+        preprocessed_output = os.path.abspath(args.save_preprocessed)
+        os.makedirs(os.path.dirname(preprocessed_output), exist_ok=True)
+        image.save(preprocessed_output)
+        print(f"Preprocessed input: {preprocessed_output}")
     sampler = {"steps": args.steps}
     meshes = pipeline.run(
         image,
         seed=args.seed,
         pipeline_type=args.pipeline_type,
-        preprocess_image=not args.preprocessed,
+        preprocess_image=preprocess_image,
         sparse_structure_sampler_params=sampler,
         shape_slat_sampler_params=sampler,
         tex_slat_sampler_params=sampler,
@@ -89,6 +124,7 @@ def main() -> int:
             output,
             decimation_target=args.decimation_target,
             texture_size=args.texture_size,
+            remesh=args.remesh,
         )
     finished = time.perf_counter()
 

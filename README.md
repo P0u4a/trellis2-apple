@@ -22,16 +22,31 @@ This fork adds an **MLX backend** for native Apple Silicon (M-series) inference,
 ### Low-memory MLX setup (24 GB Macs)
 
 The MLX loader keeps only the selected resolution's models and permanently
-releases each completed stage. Both direct 512 and direct 1024 generation fit
-on a 24 GB Mac; 512 remains the fastest/safest default.
+releases each completed stage. Direct 512 plus the 1024/1536 cascades fit on a
+24 GB Mac; 512 remains the fastest/safest default.
 
 ```sh
 ./setup_macos.sh
 .venv/bin/python scripts/download_weights.py --output-dir weights/TRELLIS.2-4B
 .venv/bin/python generate_mlx.py input.png --output outputs/model.glb
-# Higher-detail direct pipeline:
-.venv/bin/python generate_mlx.py input.png --pipeline-type 1024 --output outputs/model-1024.glb
+# Higher-quality checkpoint-default cascade:
+.venv/bin/python generate_mlx.py input.png --pipeline-type 1024_cascade --output outputs/model-1024.glb
 ```
+
+Flow transformers use BF16 compute by default to match the released
+checkpoint and minimize unified-memory pressure. `--flow-precision float32`
+is available for numerical diagnostics; it increases memory use and did not
+improve the reference character's topology.
+
+For quality-sensitive 1024 output, prefer `--pipeline-type 1024_cascade`.
+That is the checkpoint's upstream default and establishes a lower-resolution
+shape before high-resolution refinement. Direct `1024` is faster but can be
+less structurally stable.
+
+GLB export does not remesh by default because the Metal remeshing/material
+projection path is still experimental. Pass `--remesh` to match the upstream
+CUDA export recipe; compare the result carefully for holes or damaged
+materials.
 
 Use a transparent PNG when possible; this avoids loading the background
 removal network. The generator defaults to a 1024 texture and a 200K-face mesh

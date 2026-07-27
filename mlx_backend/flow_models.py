@@ -80,6 +80,7 @@ class MlxSparseStructureFlowModel(nn.Module):
         share_mod: bool = True,
         qk_rms_norm: bool = True,
         qk_rms_norm_cross: bool = True,
+        compute_dtype=mx.bfloat16,
     ):
         super().__init__()
         self.resolution = resolution
@@ -89,6 +90,7 @@ class MlxSparseStructureFlowModel(nn.Module):
         self.num_heads = num_heads
         self.pe_mode = pe_mode
         self.share_mod = share_mod
+        self.compute_dtype = compute_dtype
 
         self.t_embedder = MlxTimestepEmbedder(model_channels)
         if share_mod:
@@ -148,8 +150,9 @@ class MlxSparseStructureFlowModel(nn.Module):
         h = x.reshape(B, self.in_channels, -1).transpose(0, 2, 1)
         h = self.input_layer(h)
 
-        # Match upstream bfloat16 reduced-precision casting (manual_cast)
-        compute_dtype = mx.bfloat16
+        # BF16 matches the released checkpoint. FP32 remains available for
+        # numerical parity diagnostics on Apple GPUs.
+        compute_dtype = self.compute_dtype
         h = h.astype(compute_dtype)
 
         t_emb = self.t_embedder(t)
@@ -221,6 +224,7 @@ class MlxSLatFlowModel(nn.Module):
         share_mod: bool = True,
         qk_rms_norm: bool = True,
         qk_rms_norm_cross: bool = True,
+        compute_dtype=mx.bfloat16,
     ):
         super().__init__()
         self.resolution = resolution
@@ -230,6 +234,7 @@ class MlxSLatFlowModel(nn.Module):
         self.num_heads = num_heads
         self.pe_mode = pe_mode
         self.share_mod = share_mod
+        self.compute_dtype = compute_dtype
 
         self.t_embedder = MlxTimestepEmbedder(model_channels)
         if share_mod:
@@ -287,8 +292,7 @@ class MlxSLatFlowModel(nn.Module):
 
         h = self.input_layer(x.feats)
 
-        # Match upstream bfloat16 reduced-precision casting (manual_cast)
-        compute_dtype = mx.bfloat16
+        compute_dtype = self.compute_dtype
         h = h.astype(compute_dtype)
 
         t_emb = self.t_embedder(t)

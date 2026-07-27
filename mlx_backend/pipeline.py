@@ -143,6 +143,7 @@ def _resolve_model_path(weights_path: str, rel_path: str) -> str:
 def _load_mlx_flow_model(path: str, config: dict):
     """Load an MLX flow model from config + safetensors."""
     args = config['args']
+    compute_dtype = config.get('_mlx_compute_dtype', mx.bfloat16)
     if config['name'] == 'SparseStructureFlowModel':
         model = MlxSparseStructureFlowModel(
             resolution=args['resolution'],
@@ -157,6 +158,7 @@ def _load_mlx_flow_model(path: str, config: dict):
             share_mod=args.get('share_mod', True),
             qk_rms_norm=args.get('qk_rms_norm', True),
             qk_rms_norm_cross=args.get('qk_rms_norm_cross', True),
+            compute_dtype=compute_dtype,
         )
         is_sparse = False
     elif config['name'] in ('SLatFlowModel', 'ElasticSLatFlowModel'):
@@ -173,12 +175,13 @@ def _load_mlx_flow_model(path: str, config: dict):
             share_mod=args.get('share_mod', True),
             qk_rms_norm=args.get('qk_rms_norm', True),
             qk_rms_norm_cross=args.get('qk_rms_norm_cross', True),
+            compute_dtype=compute_dtype,
         )
         is_sparse = True
     else:
         raise ValueError(f"Unknown flow model type: {config['name']}")
 
-    weights = load_safetensors(f"{path}.safetensors")
+    weights = load_safetensors(f"{path}.safetensors", dtype=compute_dtype)
     weights = remap_flow_model_weights(weights)
     model.load_weights(list(weights.items()))
     return MlxFlowModelAdapter(model, is_sparse=is_sparse)
@@ -259,6 +262,7 @@ def create_mlx_pipeline(
     weights_path: str = "weights/TRELLIS.2-4B",
     pipeline_type: str = "512",
     release_models_after_use: bool = True,
+    flow_precision: str = "bfloat16",
 ):
     """Create upstream Trellis2ImageTo3DPipeline with MLX-backed models.
 
@@ -277,6 +281,15 @@ def create_mlx_pipeline(
         valid = ', '.join(_PIPELINE_MODELS)
         raise ValueError(f"Invalid pipeline type '{pipeline_type}'. Choose: {valid}")
     required_models = _PIPELINE_MODELS[pipeline_type]
+    flow_dtypes = {
+        'float32': mx.float32,
+        'bfloat16': mx.bfloat16,
+    }
+    if flow_precision not in flow_dtypes:
+        raise ValueError(
+            f"Invalid flow precision '{flow_precision}'. Choose: float32, bfloat16"
+        )
+    flow_dtype = flow_dtypes[flow_precision]
 
     print(f"[MLX] Loading pipeline config from {weights_path}...")
     config_file = os.path.join(weights_path, "pipeline.json")
@@ -292,6 +305,8 @@ def create_mlx_pipeline(
         path = _resolve_model_path(weights_path, rel_path)
         with open(f"{path}.json") as f:
             model_config = json.load(f)
+        if 'flow_model' in name:
+            model_config['_mlx_compute_dtype'] = flow_dtype
 
         t0 = time.time()
         loader = _get_loader(name, model_config)

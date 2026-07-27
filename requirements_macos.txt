@@ -47,3 +47,4 @@ imageio
 imageio-ffmpeg
 scipy
 einops
+easydict
