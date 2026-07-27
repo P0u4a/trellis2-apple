@@ -43,6 +43,24 @@ That is the checkpoint's upstream default and establishes a lower-resolution
 shape before high-resolution refinement. Direct `1024` is faster but can be
 less structurally stable.
 
+Multiple consistent angles can be supplied with repeatable `--view` options:
+
+```sh
+.venv/bin/python generate_mlx.py front.png \
+  --view left-three-quarter.png \
+  --view right-rear-three-quarter.png \
+  --view back.png \
+  --preprocessed \
+  --pipeline-type 1024_cascade \
+  --output outputs/model-multiview.glb
+```
+
+The primary front image retains its full DINO token grid. Auxiliary views are
+encoded sequentially and spatially pooled, which keeps conditioning memory
+bounded on a 24 GB Mac. Fused views guide structure and shape; texture
+generation deliberately uses only the primary view because the released
+texture model is trained for single-view conditioning.
+
 GLB export does not remesh by default. The guarded Metal remesher ports the
 distance, normal-agreement, and face-flip protections from Microsoft
 TRELLIS.2 PR #175, but its best settings depend on source topology. The
@@ -73,6 +91,11 @@ Save the decoded mesh when tuning post-processing so inference only runs once:
 Use a transparent PNG when possible; this avoids loading the background
 removal network. The generator defaults to a 1024 texture and a 200K-face mesh
 to keep texture baking within the Metal memory and BVH limits.
+For isolated color flecks in a baked atlas, `--texture-despeckle 0.7
+--texture-sharpen 0.25` performs selective interior outlier replacement and a
+mild unsharp pass. Both controls default to zero and do not alter geometry.
+Export defaults to `--alpha-mode opaque`; use `blend` only for assets that
+intentionally contain transparency, or `auto` to inspect the predicted alpha.
 
 The Gradio UI is optional and is not installed by `setup_macos.sh`. To use it:
 

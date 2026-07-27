@@ -17,8 +17,8 @@ def look_at(camera, point: Vector) -> None:
 def main() -> None:
     argv = sys.argv[sys.argv.index("--") + 1 :]
     input_path, output_path = map(os.path.abspath, argv[:2])
-    view_sign = float(argv[2]) if len(argv) > 2 else -1.0
-    solid = len(argv) > 3 and argv[3] == "solid"
+    view_arg = argv[2] if len(argv) > 2 else "-1"
+    solid = "solid" in argv[3:]
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.ops.import_scene.gltf(filepath=input_path)
@@ -42,7 +42,18 @@ def main() -> None:
     bpy.context.collection.objects.link(camera)
     bpy.context.scene.camera = camera
     distance = max(extent.x, extent.z) * 1.65
-    camera.location = center + Vector((0.0, view_sign * distance, 0.02 * extent.z))
+    axis_views = {
+        "x+": Vector((1.0, 0.0, 0.02)),
+        "x-": Vector((-1.0, 0.0, 0.02)),
+        "y+": Vector((0.0, 1.0, 0.02)),
+        "y-": Vector((0.0, -1.0, 0.02)),
+    }
+    if view_arg in axis_views:
+        camera_offset = axis_views[view_arg] * distance
+    else:
+        view_sign = float(view_arg)
+        camera_offset = Vector((0.0, view_sign * distance, 0.02 * extent.z))
+    camera.location = center + camera_offset
     camera_data.type = "ORTHO"
     camera_data.ortho_scale = max(extent.x, extent.z) * 1.08
     look_at(camera, center)
@@ -53,7 +64,10 @@ def main() -> None:
     key_data.size = max(extent) * 2.0
     key = bpy.data.objects.new("Key", key_data)
     bpy.context.collection.objects.link(key)
-    key.location = center + Vector((-extent.x, view_sign * distance * 0.6, extent.z))
+    view_direction = camera_offset.normalized()
+    key.location = center + Vector(
+        (-extent.x, view_direction.y * distance * 0.6, extent.z)
+    )
     look_at(key, center)
 
     fill_data = bpy.data.lights.new("Fill", "AREA")
@@ -61,7 +75,9 @@ def main() -> None:
     fill_data.size = max(extent) * 2.0
     fill = bpy.data.objects.new("Fill", fill_data)
     bpy.context.collection.objects.link(fill)
-    fill.location = center + Vector((extent.x, view_sign * distance * 0.35, 0.2 * extent.z))
+    fill.location = center + Vector(
+        (extent.x, view_direction.y * distance * 0.35, 0.2 * extent.z)
+    )
     look_at(fill, center)
 
     scene = bpy.context.scene

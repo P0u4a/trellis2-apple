@@ -23,6 +23,23 @@ def main() -> int:
         description="Generate a textured GLB using TRELLIS.2, DINOv3 and MLX."
     )
     parser.add_argument("image", help="Input image (transparent PNG works best)")
+    parser.add_argument(
+        "--view",
+        action="append",
+        default=[],
+        metavar="IMAGE",
+        help=(
+            "Auxiliary view; repeat for multiple angles. The positional image "
+            "remains the full-resolution primary conditioning view."
+        ),
+    )
+    parser.add_argument(
+        "--multiview-aux-grid",
+        type=int,
+        choices=(8, 12, 16, 24, 32),
+        default=16,
+        help="Pooled DINO patch-grid size retained for every auxiliary view.",
+    )
     parser.add_argument("--output", default="outputs/trellis2.glb")
     parser.add_argument("--weights", default="weights/TRELLIS.2-4B")
     parser.add_argument(
@@ -43,6 +60,29 @@ def main() -> int:
     )
     parser.add_argument("--decimation-target", type=int, default=200_000)
     parser.add_argument("--texture-size", type=int, choices=(512, 1024, 2048), default=1024)
+    parser.add_argument(
+        "--texture-despeckle",
+        type=float,
+        default=0.0,
+        metavar="0..1",
+        help="Selectively replace strong local base-color outliers.",
+    )
+    parser.add_argument(
+        "--texture-sharpen",
+        type=float,
+        default=0.0,
+        metavar="0..1",
+        help="Apply a mild post-bake unsharp mask without altering geometry.",
+    )
+    parser.add_argument(
+        "--alpha-mode",
+        choices=("opaque", "blend", "auto"),
+        default="opaque",
+        help=(
+            "GLB material alpha handling. Opaque avoids holes from noisy "
+            "predicted alpha and matches the upstream export default."
+        ),
+    )
     parser.add_argument(
         "--remesh",
         action=argparse.BooleanOptionalAction,
@@ -99,9 +139,16 @@ def main() -> int:
         help="Load a previously saved MeshWithVoxel and run only GLB export.",
     )
     args = parser.parse_args()
+    if not 0.0 <= args.texture_despeckle <= 1.0:
+        parser.error("--texture-despeckle must be between 0 and 1")
+    if not 0.0 <= args.texture_sharpen <= 1.0:
+        parser.error("--texture-sharpen must be between 0 and 1")
 
     if not args.load_raw and not os.path.isfile(args.image):
         parser.error(f"input image does not exist: {args.image}")
+    for view in args.view:
+        if not os.path.isfile(view):
+            parser.error(f"auxiliary view does not exist: {view}")
     if args.load_raw and not os.path.isfile(args.load_raw):
         parser.error(f"raw mesh does not exist: {args.load_raw}")
     if not args.load_raw and not os.path.isfile(os.path.join(args.weights, "pipeline.json")):
@@ -136,25 +183,38 @@ def main() -> int:
             f"active={_memory_gib(mx.get_active_memory()):.2f} GiB"
         )
 
-        image = Image.open(args.image)
+        images = [Image.open(args.image)]
+        images.extend(Image.open(path) for path in args.view)
         preprocess_image = not args.preprocessed
         if args.save_preprocessed:
             if preprocess_image:
-                image = pipeline.preprocess_image(image)
+                images = [pipeline.preprocess_image(image) for image in images]
                 preprocess_image = False
             preprocessed_output = os.path.abspath(args.save_preprocessed)
             os.makedirs(os.path.dirname(preprocessed_output), exist_ok=True)
-            image.save(preprocessed_output)
+            images[0].save(preprocessed_output)
             print(f"Preprocessed input: {preprocessed_output}")
+            stem, ext = os.path.splitext(preprocessed_output)
+            for index, view in enumerate(images[1:], start=1):
+                view_output = f"{stem}_view{index}{ext}"
+                view.save(view_output)
+                print(f"Preprocessed auxiliary view {index}: {view_output}")
+        if len(images) > 1:
+            print(
+                f"[MLX] Multi-view input: 1 primary + {len(images) - 1} auxiliary; "
+                f"auxiliary token grid={args.multiview_aux_grid}x"
+                f"{args.multiview_aux_grid}"
+            )
         sampler = {"steps": args.steps}
         meshes = pipeline.run(
-            image,
+            images if len(images) > 1 else images[0],
             seed=args.seed,
             pipeline_type=args.pipeline_type,
             preprocess_image=preprocess_image,
             sparse_structure_sampler_params=sampler,
             shape_slat_sampler_params=sampler,
             tex_slat_sampler_params=sampler,
+            multiview_aux_grid=args.multiview_aux_grid,
         )
         generated = time.perf_counter()
 
@@ -179,6 +239,9 @@ def main() -> int:
             remesh_project=args.remesh_project,
             remesh_project_max_dist=args.remesh_project_max_dist,
             remesh_project_min_agreement=args.remesh_project_min_agreement,
+            texture_despeckle=args.texture_despeckle,
+            texture_sharpen=args.texture_sharpen,
+            alpha_mode=args.alpha_mode,
         )
     finished = time.perf_counter()
 

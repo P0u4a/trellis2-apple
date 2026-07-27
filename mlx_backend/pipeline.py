@@ -369,6 +369,9 @@ def to_glb(mesh, output_path: str,
            remesh_project: float = 0.7,
            remesh_project_max_dist: float = 1.5,
            remesh_project_min_agreement: float = 0.5,
+           texture_despeckle: float = 0.0,
+           texture_sharpen: float = 0.0,
+           alpha_mode: str = 'OPAQUE',
            verbose: bool = True) -> str:
     """Export MeshWithVoxel to GLB with a Metal-safe face count."""
     import o_voxel
@@ -415,6 +418,9 @@ def to_glb(mesh, output_path: str,
         remesh_project=remesh_project,
         remesh_project_max_dist=remesh_project_max_dist,
         remesh_project_min_agreement=remesh_project_min_agreement,
+        texture_despeckle=texture_despeckle,
+        texture_sharpen=texture_sharpen,
+        alpha_mode=alpha_mode,
         verbose=verbose,
     )
     glb.export(output_path)

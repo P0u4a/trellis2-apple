@@ -17,6 +17,7 @@ from PIL import Image
 import trimesh
 import trimesh.visual
 import xatlas
+from .texture_cleanup import clean_base_color
 
 try:
     import fast_simplification
@@ -225,6 +226,9 @@ def to_glb(
     remesh_project: float = 0.9,
     remesh_project_max_dist: float = 1.5,
     remesh_project_min_agreement: float = 0.5,
+    texture_despeckle: float = 0.0,
+    texture_sharpen: float = 0.0,
+    alpha_mode: str = 'OPAQUE',
     verbose: bool = False,
     use_tqdm: bool = False,
     **kwargs,
@@ -365,20 +369,39 @@ def to_glb(
     roughness = np.clip(attrs_full[..., attr_layout['roughness']].numpy() * 255, 0, 255).astype(np.uint8)
     alpha = np.clip(attrs_full[..., attr_layout['alpha']].numpy() * 255, 0, 255).astype(np.uint8)
 
-    # Auto-detect transparency from baked alpha values
+    base_color, replaced_count = clean_base_color(
+        base_color, mask,
+        despeckle=texture_despeckle,
+        sharpen=texture_sharpen,
+    )
+    if verbose and (texture_despeckle > 0 or texture_sharpen > 0):
+        print(
+            f"Texture cleanup: replaced {replaced_count:,} outlier texels; "
+            f"despeckle={texture_despeckle:.2f}, sharpen={texture_sharpen:.2f}"
+        )
+
+    requested_alpha_mode = alpha_mode.upper()
+    if requested_alpha_mode not in {'OPAQUE', 'BLEND', 'AUTO'}:
+        raise ValueError(f"Unsupported alpha mode: {alpha_mode}")
     alpha_valid = alpha[mask]
-    if alpha_valid.size > 0 and alpha_valid.min() < 250:
-        alpha_mode = 'BLEND'
+    if requested_alpha_mode == 'AUTO':
+        alpha_mode = (
+            'BLEND'
+            if alpha_valid.size > 0 and alpha_valid.min() < 250
+            else 'OPAQUE'
+        )
         if verbose:
-            print(f"Detected transparency (alpha min={alpha_valid.min()}), using BLEND mode")
+            print(f"Auto alpha mode: {alpha_mode}")
     else:
-        alpha_mode = 'OPAQUE'
+        alpha_mode = requested_alpha_mode
 
     # Inpainting to fill UV seams
     base_color = cv2.inpaint(base_color, mask_inv, 3, cv2.INPAINT_TELEA)
     metallic = cv2.inpaint(metallic, mask_inv, 1, cv2.INPAINT_TELEA)[..., None]
     roughness = cv2.inpaint(roughness, mask_inv, 1, cv2.INPAINT_TELEA)[..., None]
     alpha = cv2.inpaint(alpha, mask_inv, 1, cv2.INPAINT_TELEA)[..., None]
+    if alpha_mode == 'OPAQUE':
+        alpha.fill(255)
 
     if use_tqdm:
         pbar.update(1)

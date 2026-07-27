@@ -253,9 +253,17 @@ class MlxImageCondAdapter:
             img.resize((self.image_size, self.image_size), PILImage.LANCZOS)
             for img in images
         ]
-        mx_out = self._mlx(resized)
-        mx.eval(mx_out)
-        return torch.from_numpy(np.array(mx_out))
+        # Encode views one at a time. DINO activations are the dominant part of
+        # image-conditioning memory, so batching views needlessly multiplies
+        # the peak on unified-memory Macs.
+        outputs = []
+        for image in resized:
+            mx_out = self._mlx([image])
+            mx.eval(mx_out)
+            outputs.append(torch.from_numpy(np.array(mx_out)))
+            del mx_out
+            mx.clear_cache()
+        return torch.cat(outputs, dim=0)
 
     def to(self, *args, **kwargs):
         return self

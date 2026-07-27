@@ -25,6 +25,61 @@ def _free_memory():
         torch.mps.empty_cache()
 
 
+def fuse_multiview_tokens(
+    cond: torch.Tensor,
+    aux_grid: int = 16,
+    num_prefix_tokens: int = 5,
+) -> torch.Tensor:
+    """Fuse DINO tokens from multiple views into one conditioning sequence.
+
+    The first view is the primary image and keeps all of its tokens. Each
+    additional view contributes one averaged prefix token and a compact,
+    spatially pooled patch grid. This preserves view-specific geometry without
+    treating views as separate output samples or multiplying attention memory
+    by the full number of views.
+    """
+    if cond.ndim != 3:
+        raise ValueError(
+            f"Expected DINO tokens shaped [views, tokens, channels], got {cond.shape}"
+        )
+    if cond.shape[0] == 1:
+        return cond
+    if aux_grid < 1:
+        raise ValueError(f"aux_grid must be positive, got {aux_grid}")
+    if cond.shape[1] <= num_prefix_tokens:
+        raise ValueError(
+            f"Token sequence has no patch tokens: {cond.shape[1]} total, "
+            f"{num_prefix_tokens} prefix"
+        )
+
+    patch_count = cond.shape[1] - num_prefix_tokens
+    source_grid = int(patch_count ** 0.5)
+    if source_grid * source_grid != patch_count:
+        raise ValueError(
+            f"Expected a square DINO patch grid, got {patch_count} patch tokens"
+        )
+    if aux_grid > source_grid:
+        raise ValueError(
+            f"aux_grid ({aux_grid}) cannot exceed source grid ({source_grid})"
+        )
+
+    fused = [cond[0:1]]
+    for view in cond[1:]:
+        global_token = view[:num_prefix_tokens].mean(dim=0, keepdim=True)
+        patches = view[num_prefix_tokens:].reshape(
+            source_grid, source_grid, cond.shape[-1]
+        )
+        patches = patches.permute(2, 0, 1).unsqueeze(0)
+        pooled = torch.nn.functional.adaptive_avg_pool2d(
+            patches, (aux_grid, aux_grid)
+        )
+        pooled = pooled.squeeze(0).permute(1, 2, 0).reshape(
+            1, aux_grid * aux_grid, cond.shape[-1]
+        )
+        fused.append(torch.cat([global_token.unsqueeze(0), pooled], dim=1))
+    return torch.cat(fused, dim=1)
+
+
 class Trellis2ImageTo3DPipeline(Pipeline):
     """
     Pipeline for inferring Trellis2 image-to-3D models.
@@ -196,7 +251,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         output = Image.fromarray((output * 255).astype(np.uint8))
         return output
         
-    def get_cond(self, image: Union[torch.Tensor, list[Image.Image]], resolution: int, include_neg_cond: bool = True) -> dict:
+    def get_cond(
+        self,
+        image: Union[torch.Tensor, list[Image.Image]],
+        resolution: int,
+        include_neg_cond: bool = True,
+        multiview_aux_grid: int = 16,
+    ) -> dict:
         """
         Get the conditioning information for the model.
 
@@ -213,6 +274,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.low_vram:
             self.image_cond_model.cpu()
             _free_memory()
+        if cond.shape[0] > 1:
+            original_tokens = cond.shape[1]
+            cond = fuse_multiview_tokens(cond, aux_grid=multiview_aux_grid)
+            print(
+                f"Multi-view conditioning: {len(image)} views, "
+                f"{original_tokens} primary tokens -> {cond.shape[1]} fused tokens"
+            )
         if not include_neg_cond:
             return {'cond': cond}
         neg_cond = torch.zeros_like(cond)
@@ -540,7 +608,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     @torch.no_grad()
     def run(
         self,
-        image: Image.Image,
+        image: Union[Image.Image, list[Image.Image]],
         num_samples: int = 1,
         seed: int = 42,
         sparse_structure_sampler_params: dict = {},
@@ -550,12 +618,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         return_latent: bool = False,
         pipeline_type: Optional[str] = None,
         max_num_tokens: int = 49152,
+        multiview_aux_grid: int = 16,
     ) -> List[MeshWithVoxel]:
         """
         Run the pipeline.
 
         Args:
-            image (Image.Image): The image prompt.
+            image: Primary image, or a list with the primary image first and
+                auxiliary views after it.
             num_samples (int): The number of samples to generate.
             seed (int): The random seed.
             sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
@@ -565,6 +635,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             return_latent (bool): Whether to return the latent codes.
             pipeline_type (str): The type of the pipeline. Options: '512', '1024', '1024_cascade', '1536_cascade'.
             max_num_tokens (int): The maximum number of tokens to use.
+            multiview_aux_grid (int): Spatial grid retained for each auxiliary
+                view. The primary view always retains its full token grid.
         """
         # Check pipeline type
         pipeline_type = pipeline_type or self.default_pipeline_type
@@ -585,11 +657,36 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         else:
             raise ValueError(f"Invalid pipeline type: {pipeline_type}")
         
+        images = image if isinstance(image, list) else [image]
+        if not images:
+            raise ValueError("At least one conditioning image is required")
+        if len(images) > 1 and num_samples != 1:
+            raise ValueError("Multi-view conditioning currently supports num_samples=1")
         if preprocess_image:
-            image = self.preprocess_image(image)
+            images = [self.preprocess_image(view) for view in images]
         torch.manual_seed(seed)
-        cond_512 = self.get_cond([image], 512)
-        cond_1024 = self.get_cond([image], 1024) if pipeline_type != '512' else None
+        cond_512 = self.get_cond(
+            images, 512, multiview_aux_grid=multiview_aux_grid
+        )
+        cond_1024 = self.get_cond(
+            images, 1024, multiview_aux_grid=multiview_aux_grid
+        ) if pipeline_type != '512' else None
+        # Multi-view tokens help infer hidden geometry, but the released
+        # texture flow is trained against a single view and can project
+        # conflicting colors when the auxiliary sequences are appended.
+        # Re-encode only the primary view for texture generation.
+        if len(images) > 1:
+            tex_cond_512 = self.get_cond([images[0]], 512)
+            tex_cond_1024 = self.get_cond(
+                [images[0]], 1024
+            ) if pipeline_type != '512' else None
+            print(
+                "Multi-view routing: fused views for structure/shape; "
+                "primary view only for texture"
+            )
+        else:
+            tex_cond_512 = cond_512
+            tex_cond_1024 = cond_1024
         self._release_image_cond_model()
         ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pipeline_type]
         coords = self.sample_sparse_structure(
@@ -605,7 +702,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             )
             self._release_model('shape_slat_flow_model_512')
             tex_slat = self.sample_tex_slat(
-                cond_512, self.models['tex_slat_flow_model_512'],
+                tex_cond_512, self.models['tex_slat_flow_model_512'],
                 shape_slat, tex_slat_sampler_params
             )
             self._release_model('tex_slat_flow_model_512')
@@ -617,7 +714,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             )
             self._release_model('shape_slat_flow_model_1024')
             tex_slat = self.sample_tex_slat(
-                cond_1024, self.models['tex_slat_flow_model_1024'],
+                tex_cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
             )
             self._release_model('tex_slat_flow_model_1024')
@@ -633,7 +730,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self._release_model('shape_slat_flow_model_512')
             self._release_model('shape_slat_flow_model_1024')
             tex_slat = self.sample_tex_slat(
-                cond_1024, self.models['tex_slat_flow_model_1024'],
+                tex_cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
             )
             self._release_model('tex_slat_flow_model_1024')
@@ -648,7 +745,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self._release_model('shape_slat_flow_model_512')
             self._release_model('shape_slat_flow_model_1024')
             tex_slat = self.sample_tex_slat(
-                cond_1024, self.models['tex_slat_flow_model_1024'],
+                tex_cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
             )
             self._release_model('tex_slat_flow_model_1024')
