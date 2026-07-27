@@ -97,6 +97,19 @@ mild unsharp pass. Both controls default to zero and do not alter geometry.
 Export defaults to `--alpha-mode opaque`; use `blend` only for assets that
 intentionally contain transparency, or `auto` to inspect the predicted alpha.
 
+For character finishing in Blender, UV-region masks can be exported from the
+face and hand polygons and passed to the localized skin cleanup utility:
+
+```sh
+.venv/bin/python scripts/clean_character_skin_texture.py \
+  outputs/basecolor.png outputs/skin_uv_regions.npz \
+  outputs/basecolor-clean.png --mask-output outputs/skin-mask.png
+```
+
+This normalizes painted lighting and color blotches only inside the supplied
+UV regions. It does not filter the coat, shirt, tie, hair, or other atlas
+islands.
+
 The Gradio UI is optional and is not installed by `setup_macos.sh`. To use it:
 
 ```sh
