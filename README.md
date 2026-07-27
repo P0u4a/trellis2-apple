@@ -19,6 +19,24 @@ https://github.com/user-attachments/assets/63b43a7e-acc7-4c81-a900-6da450527d8f
 
 This fork adds an **MLX backend** for native Apple Silicon (M-series) inference, with Metal GPU acceleration for mesh postprocessing via `mtldiffrast`, `cumesh`, and `flex_gemm`. The original CUDA pipeline is fully preserved. See `mlx_backend/` for details and `requirements_macos.txt` for macOS dependencies.
 
+### Low-memory MLX setup (24 GB Macs)
+
+The MLX loader keeps only the selected resolution's models and permanently
+releases each completed stage. Both direct 512 and direct 1024 generation fit
+on a 24 GB Mac; 512 remains the fastest/safest default.
+
+```sh
+./setup_macos.sh
+.venv/bin/python scripts/download_weights.py --output-dir weights/TRELLIS.2-4B
+.venv/bin/python generate_mlx.py input.png --output outputs/model.glb
+# Higher-detail direct pipeline:
+.venv/bin/python generate_mlx.py input.png --pipeline-type 1024 --output outputs/model-1024.glb
+```
+
+Use a transparent PNG when possible; this avoids loading the background
+removal network. The generator defaults to a 1024 texture and a 200K-face mesh
+to keep texture baking within the Metal memory and BVH limits.
+
 ## ✨ Features
 
 ### 1. High Quality, Resolution & Efficiency

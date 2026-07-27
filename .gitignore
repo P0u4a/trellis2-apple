@@ -217,6 +217,12 @@ export/coreml_models/
 
 # Generated output
 output/
+outputs/
+tmp/
+
+# Local Apple Silicon environments and caches
+.venv*/
+.cache/
 
 # Debug scripts (dev-only)
 debug_*.py

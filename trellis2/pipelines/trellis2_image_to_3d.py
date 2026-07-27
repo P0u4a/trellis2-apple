@@ -14,6 +14,11 @@ from ..representations import Mesh, MeshWithVoxel
 def _free_memory():
     """Aggressively free memory after model offload."""
     gc.collect()
+    try:
+        import mlx.core as mx
+        mx.clear_cache()
+    except (ImportError, RuntimeError):
+        pass
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     elif hasattr(torch, 'mps') and hasattr(torch.mps, 'empty_cache'):
@@ -79,6 +84,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         self.image_cond_model = image_cond_model
         self.rembg_model = rembg_model
         self.low_vram = low_vram
+        self.release_models_after_use = False
         self.default_pipeline_type = default_pipeline_type
         self.pbr_attr_layout = {
             'base_color': slice(0, 3),
@@ -115,6 +121,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pipeline.rembg_model = getattr(rembg, args['rembg_model']['name'])(**args['rembg_model']['args'])
         
         pipeline.low_vram = args.get('low_vram', True)
+        pipeline.release_models_after_use = False
         pipeline.default_pipeline_type = args.get('default_pipeline_type', '1024_cascade')
         pipeline.pbr_attr_layout = {
             'base_color': slice(0, 3),
@@ -133,6 +140,23 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.image_cond_model.to(device)
             if self.rembg_model is not None:
                 self.rembg_model.to(device)
+
+    def _release_model(self, name: str) -> None:
+        """Permanently release a completed stage in one-shot MLX mode."""
+        if not self.release_models_after_use:
+            return
+        model = self.models.pop(name, None)
+        if model is not None:
+            del model
+        _free_memory()
+
+    def _release_image_cond_model(self) -> None:
+        if not self.release_models_after_use:
+            return
+        release = getattr(self.image_cond_model, 'release', None)
+        if callable(release):
+            release()
+        _free_memory()
 
     def preprocess_image(self, input: Image.Image) -> Image.Image:
         """
@@ -328,6 +352,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.low_vram:
             flow_model_lr.cpu()
             _free_memory()
+        if self.release_models_after_use:
+            for name, model in list(self.models.items()):
+                if model is flow_model_lr:
+                    self._release_model(name)
+                    break
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
@@ -489,7 +518,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             resolution (int): The resolution of the output.
         """
         meshes, subs = self.decode_shape_slat(shape_slat, resolution)
+        self._release_model('shape_slat_decoder')
         tex_voxels = self.decode_tex_slat(tex_slat, subs)
+        self._release_model('tex_slat_decoder')
         out_mesh = []
         for m, v in zip(meshes, tex_voxels):
             m.fill_holes()
@@ -559,30 +590,37 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         torch.manual_seed(seed)
         cond_512 = self.get_cond([image], 512)
         cond_1024 = self.get_cond([image], 1024) if pipeline_type != '512' else None
+        self._release_image_cond_model()
         ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pipeline_type]
         coords = self.sample_sparse_structure(
             cond_512, ss_res,
             num_samples, sparse_structure_sampler_params
         )
+        self._release_model('sparse_structure_flow_model')
+        self._release_model('sparse_structure_decoder')
         if pipeline_type == '512':
             shape_slat = self.sample_shape_slat(
                 cond_512, self.models['shape_slat_flow_model_512'],
                 coords, shape_slat_sampler_params
             )
+            self._release_model('shape_slat_flow_model_512')
             tex_slat = self.sample_tex_slat(
                 cond_512, self.models['tex_slat_flow_model_512'],
                 shape_slat, tex_slat_sampler_params
             )
+            self._release_model('tex_slat_flow_model_512')
             res = 512
         elif pipeline_type == '1024':
             shape_slat = self.sample_shape_slat(
                 cond_1024, self.models['shape_slat_flow_model_1024'],
                 coords, shape_slat_sampler_params
             )
+            self._release_model('shape_slat_flow_model_1024')
             tex_slat = self.sample_tex_slat(
                 cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
             )
+            self._release_model('tex_slat_flow_model_1024')
             res = 1024
         elif pipeline_type == '1024_cascade':
             shape_slat, res = self.sample_shape_slat_cascade(
@@ -592,10 +630,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 coords, shape_slat_sampler_params,
                 max_num_tokens
             )
+            self._release_model('shape_slat_flow_model_512')
+            self._release_model('shape_slat_flow_model_1024')
             tex_slat = self.sample_tex_slat(
                 cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
             )
+            self._release_model('tex_slat_flow_model_1024')
         elif pipeline_type == '1536_cascade':
             shape_slat, res = self.sample_shape_slat_cascade(
                 cond_512, cond_1024,
@@ -604,14 +645,22 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 coords, shape_slat_sampler_params,
                 max_num_tokens
             )
+            self._release_model('shape_slat_flow_model_512')
+            self._release_model('shape_slat_flow_model_1024')
             tex_slat = self.sample_tex_slat(
                 cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
             )
+            self._release_model('tex_slat_flow_model_1024')
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         elif hasattr(torch, 'mps') and hasattr(torch.mps, 'empty_cache'):
             torch.mps.empty_cache()
+        try:
+            import mlx.core as mx
+            mx.clear_cache()
+        except (ImportError, RuntimeError):
+            pass
         out_mesh = self.decode_latent(shape_slat, tex_slat, res)
         if return_latent:
             return out_mesh, (shape_slat, tex_slat, res)

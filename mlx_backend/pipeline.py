@@ -29,6 +29,97 @@ from .adapters import (
     MlxImageCondAdapter,
 )
 
+_PIPELINE_MODELS = {
+    '512': {
+        'sparse_structure_flow_model',
+        'sparse_structure_decoder',
+        'shape_slat_flow_model_512',
+        'shape_slat_decoder',
+        'tex_slat_flow_model_512',
+        'tex_slat_decoder',
+    },
+    '1024': {
+        'sparse_structure_flow_model',
+        'sparse_structure_decoder',
+        'shape_slat_flow_model_1024',
+        'shape_slat_decoder',
+        'tex_slat_flow_model_1024',
+        'tex_slat_decoder',
+    },
+    '1024_cascade': {
+        'sparse_structure_flow_model',
+        'sparse_structure_decoder',
+        'shape_slat_flow_model_512',
+        'shape_slat_flow_model_1024',
+        'shape_slat_decoder',
+        'tex_slat_flow_model_1024',
+        'tex_slat_decoder',
+    },
+    '1536_cascade': {
+        'sparse_structure_flow_model',
+        'sparse_structure_decoder',
+        'shape_slat_flow_model_512',
+        'shape_slat_flow_model_1024',
+        'shape_slat_decoder',
+        'tex_slat_flow_model_1024',
+        'tex_slat_decoder',
+    },
+}
+
+
+class _LazyBiRefNet:
+    """Load background removal only if the source image has no alpha.
+
+    BiRefNet is a PyTorch model and otherwise occupies unified memory for the
+    entire generation. A transparent input never needs it.
+    """
+
+    def __init__(self, model_args: dict):
+        self._model_args = model_args
+        self._model = None
+        self._device = 'cpu'
+
+    def _load(self):
+        if self._model is None:
+            from trellis2.pipelines.rembg import BiRefNet
+            print("[MLX] Loading background remover...")
+            try:
+                self._model = BiRefNet(**self._model_args)
+            except OSError as exc:
+                configured = self._model_args.get('model_name', '')
+                if configured != 'briaai/RMBG-2.0':
+                    raise
+                print(
+                    "[MLX] BRIA RMBG-2.0 is gated; falling back to "
+                    "the public ZhengPeng7/BiRefNet checkpoint."
+                )
+                self._model = BiRefNet(model_name='ZhengPeng7/BiRefNet')
+            self._model.to(self._device)
+        return self._model
+
+    def to(self, device):
+        self._device = device
+        if self._model is not None:
+            self._model.to(device)
+        return self
+
+    def cpu(self):
+        return self.to('cpu')
+
+    def __call__(self, image):
+        result = self._load()(image)
+        # Background removal is a one-shot preprocessing stage. Releasing its
+        # PyTorch weights here returns unified memory before diffusion starts.
+        self._model = None
+        gc.collect()
+        try:
+            import torch
+            if hasattr(torch, 'mps') and hasattr(torch.mps, 'empty_cache'):
+                torch.mps.empty_cache()
+        except (ImportError, RuntimeError):
+            pass
+        return result
+
 
 def _resolve_hf_path(rel_path: str) -> str:
     """Resolve 'org/repo/path/to/file' to local HF cache path."""
@@ -164,25 +255,40 @@ def _get_loader(name: str, config: dict):
     raise ValueError(f"No loader for model '{name}' (type: {config['name']})")
 
 
-def create_mlx_pipeline(weights_path: str = "weights/TRELLIS.2-4B"):
+def create_mlx_pipeline(
+    weights_path: str = "weights/TRELLIS.2-4B",
+    pipeline_type: str = "512",
+    release_models_after_use: bool = True,
+):
     """Create upstream Trellis2ImageTo3DPipeline with MLX-backed models.
 
     All model compute runs in MLX. The upstream PT pipeline handles
     orchestration, sampling (FlowEulerCfgSampler etc.), and mesh extraction.
+
+    Only models needed by ``pipeline_type`` are loaded. This is essential on
+    unified-memory Macs: each unused 1.3B flow model costs roughly 2.6 GB in
+    bf16, and MLX modules cannot be offloaded to CPU independently.
     """
     import torch
     from trellis2.pipelines.trellis2_image_to_3d import Trellis2ImageTo3DPipeline
     from trellis2.pipelines import samplers
-    from trellis2.pipelines.rembg import BiRefNet
+
+    if pipeline_type not in _PIPELINE_MODELS:
+        valid = ', '.join(_PIPELINE_MODELS)
+        raise ValueError(f"Invalid pipeline type '{pipeline_type}'. Choose: {valid}")
+    required_models = _PIPELINE_MODELS[pipeline_type]
 
     print(f"[MLX] Loading pipeline config from {weights_path}...")
     config_file = os.path.join(weights_path, "pipeline.json")
     with open(config_file) as f:
         args = json.load(f)['args']
 
-    # Load all models with MLX adapters
+    # Load only models used by the selected resolution.
     models = {}
     for name, rel_path in args['models'].items():
+        if name not in required_models:
+            print(f"  [MLX] Skipping '{name}' (unused by {pipeline_type})")
+            continue
         path = _resolve_model_path(weights_path, rel_path)
         with open(f"{path}.json") as f:
             model_config = json.load(f)
@@ -222,12 +328,13 @@ def create_mlx_pipeline(weights_path: str = "weights/TRELLIS.2-4B"):
         load_dinov3_from_hf(args['image_cond_model']['args']['model_name'])
     )
 
-    # Background removal (PT — lightweight, used once)
-    pipeline.rembg_model = BiRefNet(**args['rembg_model']['args'])
+    # Background removal is loaded only when a non-transparent input needs it.
+    pipeline.rembg_model = _LazyBiRefNet(args['rembg_model']['args'])
 
     pipeline.low_vram = True
+    pipeline.release_models_after_use = release_models_after_use
     pipeline._device = torch.device('cpu')
-    pipeline.default_pipeline_type = args.get('default_pipeline_type', '1024_cascade')
+    pipeline.default_pipeline_type = pipeline_type
     pipeline.pbr_attr_layout = {
         'base_color': slice(0, 3),
         'metallic': slice(3, 4),
@@ -240,23 +347,42 @@ def create_mlx_pipeline(weights_path: str = "weights/TRELLIS.2-4B"):
 
 
 def to_glb(mesh, output_path: str,
-           decimation_target: int = 1000000,
-           texture_size: int = 2048,
+           decimation_target: int = 200000,
+           texture_size: int = 1024,
            remesh: bool = False,
            verbose: bool = True) -> str:
-    """Export MeshWithVoxel to GLB file."""
+    """Export MeshWithVoxel to GLB with a Metal-safe face count."""
     import o_voxel
+    import torch
+
+    vertices = mesh.vertices.cpu()
+    faces = mesh.faces.cpu()
+    target_faces = min(decimation_target, faces.shape[0])
+
+    # mtlbvh can fail on the decoder's raw ~800K-face mesh. Simplifying before
+    # BVH construction also substantially reduces peak memory during baking.
+    if faces.shape[0] > target_faces:
+        import fast_simplification
+        verts_np, faces_np = fast_simplification.simplify(
+            vertices.numpy(),
+            faces.numpy(),
+            target_count=target_faces,
+            agg=10.0,
+        )
+        vertices = torch.from_numpy(verts_np).float()
+        faces = torch.from_numpy(faces_np.astype('int32'))
+        print(f"Simplified mesh to {faces.shape[0]:,} faces before texture baking.")
 
     print(f"Exporting to {output_path}...")
     glb = o_voxel.postprocess.to_glb(
-        vertices=mesh.vertices,
-        faces=mesh.faces,
-        attr_volume=mesh.attrs,
-        coords=mesh.coords,
+        vertices=vertices,
+        faces=faces,
+        attr_volume=mesh.attrs.cpu(),
+        coords=mesh.coords.cpu(),
         attr_layout=mesh.layout,
         voxel_size=mesh.voxel_size,
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-        decimation_target=decimation_target,
+        decimation_target=target_faces,
         texture_size=texture_size,
         remesh=remesh,
         verbose=verbose,
@@ -273,8 +399,12 @@ class MlxTrellis2Pipeline:
     Thin wrapper that creates the upstream pipeline and delegates .run()/.to_glb().
     """
 
-    def __init__(self, weights_path: str = "weights/TRELLIS.2-4B"):
-        self._pipeline = create_mlx_pipeline(weights_path)
+    def __init__(
+        self,
+        weights_path: str = "weights/TRELLIS.2-4B",
+        pipeline_type: str = "512",
+    ):
+        self._pipeline = create_mlx_pipeline(weights_path, pipeline_type)
 
     def run(self, image, **kwargs):
         return self._pipeline.run(image, **kwargs)

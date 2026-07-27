@@ -11,9 +11,12 @@ torch>=2.11.0
 torchvision>=0.26.0
 transformers>=4.40.0,<5
 safetensors
-huggingface_hub
+huggingface_hub>=0.34,<1.0
 pillow
 numpy
+setuptools
+wheel
+pybind11
 
 # Mesh processing
 trimesh
@@ -23,19 +26,21 @@ pygltflib
 
 # Image processing
 opencv-python-headless
+kornia
+timm
 
 # Server
 fastapi
 uvicorn[standard]
 pydantic>=2.0
+gradio>=5,<6
 
 # MLX (Apple Silicon native)
 mlx>=0.31.0
 
-# Metal GPU packages (Apple Silicon — install with: pip install --no-build-isolation <url>)
-mtldiffrast @ https://github.com/pedronaugusto/mtldiffrast/archive/main.tar.gz
-cumesh @ https://github.com/pedronaugusto/mtlmesh/archive/main.tar.gz
-flex_gemm @ https://github.com/pedronaugusto/mtlgemm/archive/main.tar.gz
+# Metal extensions are deliberately installed by setup_macos.sh after torch.
+# Building these inline in this file makes pip's isolated builds fail because
+# their setup scripts import torch before the core environment exists.
 
 # Misc
 tqdm

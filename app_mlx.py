@@ -10,7 +10,6 @@ import shutil
 import numpy as np
 from PIL import Image
 import torch
-import o_voxel
 
 MAX_SEED = np.iinfo(np.int32).max
 TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tmp')
@@ -39,10 +38,17 @@ def image_to_3d(
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ):
+    global pipeline
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
     os.makedirs(user_dir, exist_ok=True)
 
-    pipeline_type = {"512": "512", "1024": "1024_cascade", "1536": "1536_cascade"}[resolution]
+    pipeline_type = {"512": "512", "1024": "1024"}[resolution]
+    if 'sparse_structure_flow_model' not in pipeline.models:
+        from mlx_backend.pipeline import create_mlx_pipeline
+        pipeline = create_mlx_pipeline(
+            weights_path="weights/TRELLIS.2-4B",
+            pipeline_type=pipeline_type,
+        )
 
     t0 = time.time()
     meshes = pipeline.run(
@@ -66,24 +72,17 @@ def image_to_3d(
     mesh = meshes[0]
 
     t0 = time.time()
-    glb = o_voxel.postprocess.to_glb(
-        vertices=mesh.vertices,
-        faces=mesh.faces,
-        attr_volume=mesh.attrs,
-        coords=mesh.coords,
-        attr_layout=mesh.layout,
-        voxel_size=mesh.voxel_size,
-        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-        decimation_target=decimation_target,
-        texture_size=texture_size,
-        verbose=True,
-    )
-    dt_post = time.time() - t0
-
+    from mlx_backend.pipeline import to_glb
     now = datetime.now()
     timestamp = now.strftime("%Y-%m-%dT%H%M%S") + f".{now.microsecond // 1000:03d}"
     glb_path = os.path.join(user_dir, f'sample_{timestamp}.glb')
-    glb.export(glb_path)
+    to_glb(
+        mesh,
+        glb_path,
+        decimation_target=decimation_target,
+        texture_size=texture_size,
+    )
+    dt_post = time.time() - t0
 
     info = (f"Generation: {dt_gen:.0f}s | Post-processing: {dt_post:.0f}s | "
             f"Verts: {mesh.vertices.shape[0]:,} | Faces: {mesh.faces.shape[0]:,}")
@@ -111,11 +110,11 @@ with gr.Blocks(title="Trellis2 MLX") as demo:
         with gr.Column(scale=1, min_width=360):
             image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
 
-            resolution = gr.Radio(["512", "1024"], label="Resolution", value="1024")
+            resolution = gr.Radio(["512", "1024"], label="Resolution", value="512")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=42, step=1)
             randomize_seed = gr.Checkbox(label="Randomize Seed", value=False)
-            decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=1000000, step=10000)
-            texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
+            decimation_target = gr.Slider(100000, 400000, label="Decimation Target", value=200000, step=10000)
+            texture_size = gr.Slider(512, 2048, label="Texture Size", value=1024, step=512)
 
             generate_btn = gr.Button("Generate", variant="primary")
 
@@ -169,6 +168,9 @@ if __name__ == "__main__":
     os.makedirs(TMP_DIR, exist_ok=True)
 
     from mlx_backend.pipeline import create_mlx_pipeline
-    pipeline = create_mlx_pipeline(weights_path="weights/TRELLIS.2-4B")
+    pipeline = create_mlx_pipeline(
+        weights_path="weights/TRELLIS.2-4B",
+        pipeline_type="512",
+    )
 
     demo.launch()

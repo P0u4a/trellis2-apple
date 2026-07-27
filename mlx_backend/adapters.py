@@ -262,3 +262,9 @@ class MlxImageCondAdapter:
 
     def cpu(self):
         return self
+
+    def release(self):
+        """Release DINOv3 weights after one-shot image conditioning."""
+        if hasattr(self, '_mlx'):
+            del self._mlx
+        mx.clear_cache()
